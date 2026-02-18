@@ -1,0 +1,70 @@
+require("dotenv").config();
+const { Telegraf } = require("telegraf");
+const express = require("express");
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+
+// -------------------- Telegram --------------------
+const BOT_TOKEN = process.env.BOT_TOKEN; // ставим токен в .env
+if (!BOT_TOKEN) throw new Error("BOT_TOKEN не задан в .env");
+
+const bot = new Telegraf(BOT_TOKEN);
+bot.start((ctx) => ctx.reply("Skinss HTTP бот запущен!"));
+bot.help((ctx) => ctx.reply("/upload_skin <UUID> — загрузить скин\n/upload_cape <UUID> — загрузить плащ"));
+
+// -------------------- HTTP сервис --------------------
+const app = express();
+const PORT = process.env.PORT || 3000;
+const DATA_DIR = path.join(__dirname, "data");
+fs.mkdirSync(DATA_DIR, { recursive: true });
+
+app.use(express.raw({ type: "*/*", limit: "8mb" }));
+
+function sha256(buf) { return crypto.createHash("sha256").update(buf).digest("hex"); }
+const skinPath = uuid => path.join(DATA_DIR, `${uuid}.skin`);
+const capePath = uuid => path.join(DATA_DIR, `${uuid}.cape`);
+const metaPath = uuid => path.join(DATA_DIR, `${uuid}.json`);
+
+function readMeta(uuid) {
+  if (!fs.existsSync(metaPath(uuid))) return { hasSkin: false, hasCape: false, capeIsGif: false, model: "default", skinHash: "", capeHash: "" };
+  return JSON.parse(fs.readFileSync(metaPath(uuid), "utf8"));
+}
+function writeMeta(uuid, meta) { fs.writeFileSync(metaPath(uuid), JSON.stringify(meta, null, 2), "utf8"); }
+function isPng(buf) { return buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47; }
+function isGif(buf) { if (buf.length < 6) return false; const s = buf.subarray(0, 6).toString("ascii"); return s === "GIF87a" || s === "GIF89a"; }
+
+// -------------------- Эндпоинты HTTP --------------------
+app.put("/v1/skin/:uuid", (req, res) => {
+  const uuid = req.params.uuid, buf = req.body;
+  if (!Buffer.isBuffer(buf) || !isPng(buf)) return res.status(400).send("Invalid PNG");
+  fs.writeFileSync(skinPath(uuid), buf);
+  const meta = readMeta(uuid); meta.hasSkin = true; meta.skinHash = sha256(buf); writeMeta(uuid, meta);
+  res.json({ ok: true, skinHash: meta.skinHash });
+});
+
+app.put("/v1/cape/:uuid", (req, res) => {
+  const uuid = req.params.uuid, buf = req.body;
+  if (!Buffer.isBuffer(buf) || (!isPng(buf) && !isGif(buf))) return res.status(400).send("Invalid PNG/GIF");
+  fs.writeFileSync(capePath(uuid), buf);
+  const meta = readMeta(uuid); meta.hasCape = true; meta.capeIsGif = isGif(buf); meta.capeHash = sha256(buf); writeMeta(uuid, meta);
+  res.json({ ok: true, capeHash: meta.capeHash });
+});
+
+app.get("/v1/skin/:uuid", (req, res) => {
+  const uuid = req.params.uuid, p = skinPath(uuid);
+  if (!fs.existsSync(p)) return res.sendStatus(404);
+  const buf = fs.readFileSync(p), meta = readMeta(uuid);
+  res.setHeader("Content-Type", "image/png"); res.send(buf);
+});
+
+app.get("/v1/cape/:uuid", (req, res) => {
+  const uuid = req.params.uuid, p = capePath(uuid);
+  if (!fs.existsSync(p)) return res.sendStatus(404);
+  const buf = fs.readFileSync(p), meta = readMeta(uuid);
+  res.setHeader("Content-Type", meta.capeIsGif ? "image/gif" : "image/png"); res.send(buf);
+});
+
+// -------------------- Запуск --------------------
+app.listen(PORT, () => console.log(`HTTP сервис Skinss+ запущен на порту ${PORT}`));
+bot.launch().then(() => console.log("Telegram-бот запущен!"));
